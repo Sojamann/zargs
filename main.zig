@@ -43,6 +43,50 @@ const Template = struct {
         };
     }
 
+    pub fn template(self: Template, columns: [][]const u8) !void {
+        // compute the total size of all USED columns
+        var size_used_columns: u64 = 0;
+        for (self.col_mapping) |col| {
+            if (col == 0) {
+                continue;
+            }
+
+            if (columns.len < col) {
+                return error.TooLittleColumnsForTemplate;
+            }
+            size_used_columns += columns[col - 1].len;
+        }
+
+        var size_of_template: u64 = 0;
+        for (self.parts) |part| {
+            size_of_template += part.len;
+        }
+
+        var result_width = size_used_columns + size_of_template + (self.parts.len);
+        var buff = try self.allocator.alloc(u8, result_width);
+        defer self.allocator.free(buff);
+
+        var offset: usize = 0;
+        for (self.col_mapping, 0..) |col, i| {
+            if (col == 0) {
+                std.mem.copyForwards(u8, buff[offset..], self.parts[i]);
+                offset += self.parts[i].len;
+                buff[offset] = ' ';
+                offset += 1;
+                continue;
+            }
+
+            const col_content = columns[self.col_mapping[i] - 1];
+            std.mem.copyForwards(u8, buff[offset..], col_content);
+            offset += col_content.len;
+            buff[offset] = ' ';
+            offset += 1;
+        }
+
+        // TODO: no splitting... as tpl might not even need whitespace!
+        std.debug.print("{s}\n", .{buff});
+    }
+
     pub fn deinit(self: Template) void {
         self.allocator.free(self.parts);
         self.allocator.free(self.col_mapping);
@@ -96,4 +140,11 @@ pub fn main() !void {
 
     std.debug.print("{any}", .{tpl.parts});
     std.debug.print("{any}", .{tpl.col_mapping});
+
+    var parts = std.mem.zeroes([4][]const u8);
+    parts[0] = "col1";
+    parts[1] = "col2";
+    parts[2] = "col3";
+    parts[3] = "col4";
+    try tpl.template(&parts);
 }
