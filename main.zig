@@ -6,90 +6,78 @@ const MAX_COLUMNS = 150;
 const Template = struct {
     /// parts are views into the provided slice
     /// NOTE: the spot that the template had is an empty slice
-    parts: []const []const u8,
+    parts: [MAX_COLUMNS]?[]const u8 = std.mem.zeroes([MAX_COLUMNS]?[]const u8),
 
     /// col mapping specifies which placeholder the column has
     /// it is absent for non templates. This is 1-index based
-    col_mapping: []u8,
+    col_mapping: [MAX_COLUMNS]?u8 = std.mem.zeroes([MAX_COLUMNS]?u8),
 
-    allocator: std.mem.Allocator,
+    num_columns: usize = 0,
 
-    pub fn init(s: []const u8, allocator: std.mem.Allocator) !Template {
-        const num_tokens = std.mem.count(u8, s, " ") + 1;
+    pub fn init(s: []const u8, opening: u8, closing: u8) !Template {
+        var tpl = Template{};
+        var offset: usize = 0;
+        while (offset < s.len) {
+            const start = std.mem.indexOfScalarPos(u8, s, offset, opening) orelse {
+                tpl.parts[tpl.num_columns] = s[offset..];
+                tpl.col_mapping[tpl.num_columns] = null;
+                tpl.num_columns += 1;
+                break;
+            };
 
-        var parts = try allocator.alloc([]const u8, num_tokens);
-        var col_mapping = try allocator.alloc(u8, num_tokens);
-        @memset(col_mapping, 0);
+            const end = std.mem.indexOfScalarPos(u8, s, start + 1, closing) orelse {
+                return error.InvalidSyntax;
+            };
 
-        var token_iter = std.mem.tokenizeSequence(u8, s, " ");
+            tpl.parts[tpl.num_columns] = s[offset..start];
+            tpl.parts[tpl.num_columns + 1] = null;
+            tpl.col_mapping[tpl.num_columns] = null;
+            tpl.col_mapping[tpl.num_columns + 1] = try std.fmt.parseInt(u8, s[start + 1 .. end], 10);
 
-        for (0..num_tokens) |i| {
-            var word = token_iter.next().?;
-
-            if (word.len <= 2 or word[0] != '{' and word[word.len - 1] != '}') {
-                parts[i] = word;
-                continue;
-            }
-
-            word = word[1 .. word.len - 1];
-            parts[i] = word[0..0];
-            col_mapping[i] = try std.fmt.parseInt(u8, word, 10);
+            tpl.num_columns += 2;
+            offset = end + 1;
         }
 
-        return Template{
-            .allocator = allocator,
-            .parts = parts,
-            .col_mapping = col_mapping,
-        };
+        return tpl;
     }
 
-    pub fn template(self: Template, columns: [][]const u8) !void {
+    pub fn template(self: Template, columns: [][]const u8, buff: []u8) ![]u8 {
         // compute the total size of all USED columns
         var size_used_columns: u64 = 0;
-        for (self.col_mapping) |col| {
-            if (col == 0) {
-                continue;
-            }
-
-            if (columns.len < col) {
-                return error.TooLittleColumnsForTemplate;
-            }
-            size_used_columns += columns[col - 1].len;
-        }
-
         var size_of_template: u64 = 0;
-        for (self.parts) |part| {
-            size_of_template += part.len;
+
+        for (0..self.num_columns) |i| {
+            if (self.col_mapping[i]) |col| {
+                if (col >= columns.len) {
+                    return error.TooLittleColumnsForTemplate;
+                }
+                size_used_columns += columns[col - 1].len;
+            }
+            if (self.parts[i]) |part| {
+                size_of_template += part.len;
+            }
         }
 
-        var result_width = size_used_columns + size_of_template + (self.parts.len);
-        var buff = try self.allocator.alloc(u8, result_width);
-        defer self.allocator.free(buff);
+        var result_width = size_used_columns + size_of_template + (self.num_columns);
+        if (result_width > buff.len) {
+            return error.TemplateResultTooLong;
+        }
 
         var offset: usize = 0;
-        for (self.col_mapping, 0..) |col, i| {
-            if (col == 0) {
-                std.mem.copyForwards(u8, buff[offset..], self.parts[i]);
-                offset += self.parts[i].len;
-                buff[offset] = ' ';
-                offset += 1;
+        for (0..self.num_columns) |i| {
+            if (self.col_mapping[i]) |col| {
+                const col_content = columns[col];
+                std.mem.copyForwards(u8, buff[offset..], col_content);
+                offset += col_content.len;
                 continue;
             }
 
-            const col_content = columns[self.col_mapping[i] - 1];
-            std.mem.copyForwards(u8, buff[offset..], col_content);
-            offset += col_content.len;
-            buff[offset] = ' ';
-            offset += 1;
+            const template_str = self.parts[i].?;
+            std.mem.copyForwards(u8, buff[offset..], template_str);
+            offset += template_str.len;
         }
 
-        // TODO: no splitting... as tpl might not even need whitespace!
-        std.debug.print("{s}\n", .{buff});
-    }
-
-    pub fn deinit(self: Template) void {
-        self.allocator.free(self.parts);
-        self.allocator.free(self.col_mapping);
+        return buff[0..result_width];
     }
 };
 
@@ -131,20 +119,15 @@ pub fn main() !void {
 
     try processLineWise(stdin);
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const tpl = try Template.init(tplstr, allocator);
-    defer tpl.deinit();
-
-    std.debug.print("{any}", .{tpl.parts});
-    std.debug.print("{any}", .{tpl.col_mapping});
+    const tpl = try Template.init(tplstr, '{', '}');
 
     var parts = std.mem.zeroes([4][]const u8);
     parts[0] = "col1";
     parts[1] = "col2";
     parts[2] = "col3";
     parts[3] = "col4";
-    try tpl.template(&parts);
+
+    var buff = std.mem.zeroes([1000]u8);
+
+    std.debug.print("{s}\n", .{try tpl.template(&parts, &buff)});
 }
