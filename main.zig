@@ -45,26 +45,26 @@ const Template = struct {
     targets: [MAX_COLUMNS]MapTarget = undefined,
     num_parts: usize = 0,
 
-    pub fn init(s: []const u8, opening: u8, closing: u8) !Template {
+    pub fn init(s: []const u8, opening: []const u8, closing: []const u8) !Template {
         var tpl = Template{};
         var offset: usize = 0;
         while (offset < s.len) {
-            const start = std.mem.indexOfScalarPos(u8, s, offset, opening) orelse {
+            const start = std.mem.indexOfPos(u8, s, offset, opening) orelse {
                 tpl.parts[tpl.num_parts] = s[offset..];
                 tpl.targets[tpl.num_parts] = MapTarget.template_str;
                 tpl.num_parts += 1;
                 break;
             };
 
-            const end = std.mem.indexOfScalarPos(u8, s, start + 1, closing) orelse {
-                return error.InvalidTemplateSyntax;
+            const end = std.mem.indexOfPos(u8, s, start + opening.len, closing) orelse {
+                return error.TemplatePlaceholderNotClosed;
             };
 
             tpl.parts[tpl.num_parts] = s[offset..start];
             tpl.parts[tpl.num_parts + 1] = s[0..0];
             tpl.targets[tpl.num_parts] = MapTarget.template_str;
 
-            const col = std.mem.trim(u8, s[start + 1 .. end], " ");
+            const col = std.mem.trim(u8, s[start + opening.len .. end], " ");
             if (col.len > 0) {
                 tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_index = try std.fmt.parseInt(u8, col, 10) };
             } else {
@@ -72,7 +72,7 @@ const Template = struct {
             }
 
             tpl.num_parts += 2;
-            offset = end + 1;
+            offset = end + closing.len;
         }
 
         return tpl;
@@ -162,33 +162,39 @@ fn processLineWise(f: std.fs.File, tpl: *const Template, column_delim: []const u
 
 pub fn main() !void {
     const params = comptime clap.parseParamsComptime(
-        \\-h, --help             Display this help and exit.
-        \\-d, --delimiter <str>  Column delimiter to use (Defaults to: ' ').
+        \\-h, --help                        Display this help and exit.
+        \\-d, --delimiter <str>             Column delimiter to use for templating (Defaults to: ' ').
+        \\-s, --tplstart <str>              What character sequence starts a template placeholder (Defaults to: '{').
+        \\-e, --tplend <str>                What character sequence ends a template placeholder (Defaults to: '}').
         \\<str>...
         \\
     );
-    var res = try clap.parse(clap.Help, &params, clap.parsers.default, .{});
+    const err_writer = std.io.getStdErr().writer();
+
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, .{}) catch {
+        return clap.usage(err_writer, clap.Help, &params);
+    };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+        return clap.help(err_writer, clap.Help, &params, .{});
     }
 
-    if (res.positionals.len < 1)
-        return clap.usage(
-            std.io.getStdErr().writer(),
-            clap.Help,
-            &params,
-        );
+    if (res.positionals.len < 1) {
+        return clap.usage(err_writer, clap.Help, &params);
+    }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     const delim = res.args.delimiter orelse " ";
+    const opening = res.args.tplstart orelse "{";
+    const closing = res.args.tplend orelse "}";
     const tplstr = try std.mem.join(allocator, " ", res.positionals);
+    defer allocator.free(tplstr);
 
-    const tpl = try Template.init(tplstr, '{', '}');
+    const tpl = try Template.init(tplstr, opening, closing);
 
     try processLineWise(std.io.getStdIn(), &tpl, delim, allocator);
 }
