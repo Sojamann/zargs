@@ -1,4 +1,5 @@
 const std = @import("std");
+const clap = @import("clap");
 
 const MAX_LINE_LENGTH = 10000;
 const MAX_COLUMNS = 150;
@@ -160,17 +161,34 @@ fn processLineWise(f: std.fs.File, tpl: *const Template, column_delim: []const u
 }
 
 pub fn main() !void {
-    const stdin = std.io.getStdIn();
-    var argIter = std.process.args();
-    _ = argIter.next();
-    const tplstr = argIter.next() orelse "";
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help             Display this help and exit.
+        \\-d, --delimiter <str>  Column delimiter to use (Defaults to: ' ').
+        \\<str>...
+        \\
+    );
+    var res = try clap.parse(clap.Help, &params, clap.parsers.default, .{});
+    defer res.deinit();
+
+    if (res.args.help != 0) {
+        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+    }
+
+    if (res.positionals.len < 1)
+        return clap.usage(
+            std.io.getStdErr().writer(),
+            clap.Help,
+            &params,
+        );
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-
     const allocator = arena.allocator();
+
+    const delim = res.args.delimiter orelse " ";
+    const tplstr = try std.mem.join(allocator, " ", res.positionals);
 
     const tpl = try Template.init(tplstr, '{', '}');
 
-    try processLineWise(stdin, &tpl, " ", allocator);
+    try processLineWise(std.io.getStdIn(), &tpl, delim, allocator);
 }

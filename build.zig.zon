@@ -1,0 +1,12 @@
+.{
+    .name = "zargs",
+    .version = "0.0.1",
+
+    .dependencies = .{
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.7.0.tar.gz",
+            .hash = "1220483a4a19b02f8e3d59d75706be0392a0326f4b3b30daa3055676f5a98ddb1f11",
+        }
+    }
+}
+
