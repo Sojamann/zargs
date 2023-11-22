@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const MAX_LINE_LENGTH = 1000;
+const MAX_LINE_LENGTH = 10000;
 const MAX_COLUMNS = 150;
-const MAX_TEMPLATE_RESULT_LENGTH = 2000;
+const MAX_TEMPLATE_RESULT_LENGTH = MAX_LINE_LENGTH * 3;
 
 /// basically cached token iterator result
 const ColumnStringView = struct {
@@ -31,35 +31,43 @@ const ColumnStringView = struct {
 };
 
 const Template = struct {
-    /// NOTE: the spot that the template had is an empty slice
-    parts: [MAX_COLUMNS]?[]const u8 = std.mem.zeroes([MAX_COLUMNS]?[]const u8),
+    const MapTarget = union(enum) {
+        column_index: usize,
+        all_columns: void,
+        template_str: void,
+    };
 
-    /// col mapping specifies which placeholder the column has
-    col_mapping: [MAX_COLUMNS]?u8 = std.mem.zeroes([MAX_COLUMNS]?u8),
-
-    num_columns: usize = 0,
+    parts: [MAX_COLUMNS][]const u8 = std.mem.zeroes([MAX_COLUMNS][]const u8),
+    targets: [MAX_COLUMNS]MapTarget = undefined,
+    num_parts: usize = 0,
 
     pub fn init(s: []const u8, opening: u8, closing: u8) !Template {
         var tpl = Template{};
         var offset: usize = 0;
         while (offset < s.len) {
             const start = std.mem.indexOfScalarPos(u8, s, offset, opening) orelse {
-                tpl.parts[tpl.num_columns] = s[offset..];
-                tpl.col_mapping[tpl.num_columns] = null;
-                tpl.num_columns += 1;
+                tpl.parts[tpl.num_parts] = s[offset..];
+                tpl.targets[tpl.num_parts] = MapTarget.template_str;
+                tpl.num_parts += 1;
                 break;
             };
 
             const end = std.mem.indexOfScalarPos(u8, s, start + 1, closing) orelse {
-                return error.InvalidSyntax;
+                return error.InvalidTemplateSyntax;
             };
 
-            tpl.parts[tpl.num_columns] = s[offset..start];
-            tpl.parts[tpl.num_columns + 1] = null;
-            tpl.col_mapping[tpl.num_columns] = null;
-            tpl.col_mapping[tpl.num_columns + 1] = try std.fmt.parseInt(u8, s[start + 1 .. end], 10);
+            tpl.parts[tpl.num_parts] = s[offset..start];
+            tpl.parts[tpl.num_parts + 1] = s[0..0];
+            tpl.targets[tpl.num_parts] = MapTarget.template_str;
 
-            tpl.num_columns += 2;
+            const col = std.mem.trim(u8, s[start + 1 .. end], " ");
+            if (col.len > 0) {
+                tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_index = try std.fmt.parseInt(u8, col, 10) };
+            } else {
+                tpl.targets[tpl.num_parts + 1] = MapTarget.all_columns;
+            }
+
+            tpl.num_parts += 2;
             offset = end + 1;
         }
 
@@ -67,42 +75,45 @@ const Template = struct {
     }
 
     pub fn template(self: Template, columns: [][]const u8, buff: []u8) ![]u8 {
-        // compute the total size of all USED columns
-        var size_used_columns: u64 = 0;
-        var size_of_template: u64 = 0;
-
-        for (0..self.num_columns) |i| {
-            if (self.col_mapping[i]) |col| {
-                if (col >= columns.len) {
-                    return error.TooLittleColumnsForTemplate;
-                }
-                size_used_columns += columns[col].len;
-            }
-            if (self.parts[i]) |part| {
-                size_of_template += part.len;
-            }
-        }
-
-        var result_width = size_used_columns + size_of_template + (self.num_columns);
-        if (result_width > buff.len) {
-            return error.TemplateResultTooLong;
-        }
-
         var offset: usize = 0;
-        for (0..self.num_columns) |i| {
-            if (self.col_mapping[i]) |col| {
-                const col_content = columns[col];
-                std.mem.copyForwards(u8, buff[offset..], col_content);
-                offset += col_content.len;
-                continue;
-            }
+        for (0..self.num_parts) |i| {
+            switch (self.targets[i]) {
+                .template_str => {
+                    const s = self.parts[i];
+                    if (s.len + offset >= buff.len) {
+                        return error.TemplateResultTooLong;
+                    }
 
-            const template_str = self.parts[i].?;
-            std.mem.copyForwards(u8, buff[offset..], template_str);
-            offset += template_str.len;
+                    std.mem.copyForwards(u8, buff[offset..], s);
+                    offset += s.len;
+                },
+                .column_index => |index| {
+                    if (index >= columns.len) {
+                        return error.TooLittleColumnsForTemplate;
+                    }
+
+                    const s = columns[index];
+                    if (s.len + offset >= buff.len) {
+                        return error.TemplateResultTooLong;
+                    }
+
+                    std.mem.copyForwards(u8, buff[offset..], s);
+                    offset += s.len;
+                },
+                .all_columns => {
+                    for (columns) |s| {
+                        if (s.len + offset >= buff.len) {
+                            return error.TemplateResultTooLong;
+                        }
+
+                        std.mem.copyForwards(u8, buff[offset..], s);
+                        offset += s.len;
+                    }
+                },
+            }
         }
 
-        return buff[0..result_width];
+        return buff[0..offset];
     }
 };
 
