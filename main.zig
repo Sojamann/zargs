@@ -117,10 +117,7 @@ const Template = struct {
     }
 };
 
-// TODO: use a heap allocated buffer as this is much faster than having
-//          so many read syscalls
-//          .
-fn processLineWise(f: std.fs.File, tpl: *const Template, allocator: std.mem.Allocator) !void {
+fn processLineWise(f: std.fs.File, tpl: *const Template, column_delim: []const u8, allocator: std.mem.Allocator) !void {
     var line_buff = try allocator.alloc(u8, MAX_LINE_LENGTH);
     defer allocator.free(line_buff);
     var tpl_buffer = try allocator.alloc(u8, MAX_TEMPLATE_RESULT_LENGTH);
@@ -134,12 +131,11 @@ fn processLineWise(f: std.fs.File, tpl: *const Template, allocator: std.mem.Allo
         if (std.mem.indexOf(u8, line_buff[offset..], "\n")) |found| {
             const line = line_buff[offset .. offset + found];
             if (line.len != 0) {
-                // TODO: accept a delimiter instead of this hard coded one
-                const tpl_res = try tpl.template(try tokenizationCache.update(line, " "), tpl_buffer);
+                const columns = try tpl.template(try tokenizationCache.update(line, column_delim), tpl_buffer);
 
                 // TODO: need error handling for FileNotFound and different exist codes.
-                var child = std.process.Child.init(try tokenizationCache.update(tpl_res, " "), allocator);
-                std.debug.print("Res: {}", .{try child.spawnAndWait()});
+                var child = std.process.Child.init(try tokenizationCache.update(columns, " "), allocator);
+                _ = try child.spawnAndWait();
             }
             offset += found + 1;
             continue;
@@ -173,5 +169,5 @@ pub fn main() !void {
 
     const tpl = try Template.init(tplstr, '{', '}');
 
-    try processLineWise(stdin, &tpl, allocator);
+    try processLineWise(stdin, &tpl, " ", allocator);
 }
