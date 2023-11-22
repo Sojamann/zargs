@@ -9,7 +9,7 @@ const ColumnStringView = struct {
     cache: [MAX_COLUMNS][]const u8 = std.mem.zeroes([MAX_COLUMNS][]const u8),
     count: usize = 0,
 
-    pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) !void {
+    pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) ![][]const u8 {
         self.count = 0;
 
         var iter = std.mem.tokenizeSequence(u8, s, delim);
@@ -21,6 +21,8 @@ const ColumnStringView = struct {
             self.cache[self.count] = word;
             self.count += 1;
         }
+
+        return self.fields();
     }
 
     pub fn fields(self: *ColumnStringView) [][]const u8 {
@@ -107,27 +109,32 @@ const Template = struct {
 // TODO: use a heap allocated buffer as this is much faster than having
 //          so many read syscalls
 //          .
-fn processLineWise(f: std.fs.File, tpl: *const Template) !void {
-    var line_buff = std.mem.zeroes([MAX_LINE_LENGTH]u8);
-    var tpl_buffer = std.mem.zeroes([MAX_TEMPLATE_RESULT_LENGTH]u8);
+fn processLineWise(f: std.fs.File, tpl: *const Template, allocator: std.mem.Allocator) !void {
+    var line_buff = try allocator.alloc(u8, MAX_LINE_LENGTH);
+    defer allocator.free(line_buff);
+    var tpl_buffer = try allocator.alloc(u8, MAX_TEMPLATE_RESULT_LENGTH);
+    defer allocator.free(tpl_buffer);
+
     var tokenizationCache: ColumnStringView = ColumnStringView{};
     var offset: usize = 0;
 
-    var n = try f.read(&line_buff);
+    var n = try f.read(line_buff);
     while (true) {
         if (std.mem.indexOf(u8, line_buff[offset..], "\n")) |found| {
             const line = line_buff[offset .. offset + found];
             if (line.len != 0) {
                 // TODO: accept a delimiter instead of this hard coded one
-                try tokenizationCache.update(line, " ");
-                const tpl_res = try tpl.template(tokenizationCache.fields(), &tpl_buffer);
-                std.debug.print("{s}\n", .{tpl_res});
+                const tpl_res = try tpl.template(try tokenizationCache.update(line, " "), tpl_buffer);
+
+                // TODO: need error handling for FileNotFound and different exist codes.
+                var child = std.process.Child.init(try tokenizationCache.update(tpl_res, " "), allocator);
+                std.debug.print("Res: {}", .{try child.spawnAndWait()});
             }
             offset += found + 1;
             continue;
         }
 
-        std.mem.copyForwards(u8, &line_buff, line_buff[offset..]);
+        std.mem.copyForwards(u8, line_buff, line_buff[offset..]);
 
         n = try f.read(line_buff[line_buff.len - offset ..]);
         if (n == 0) {
@@ -148,7 +155,12 @@ pub fn main() !void {
     _ = argIter.next();
     const tplstr = argIter.next() orelse "";
 
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
     const tpl = try Template.init(tplstr, '{', '}');
 
-    try processLineWise(stdin, &tpl);
+    try processLineWise(stdin, &tpl, allocator);
 }
