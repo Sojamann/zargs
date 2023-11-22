@@ -6,11 +6,14 @@ const MAX_TEMPLATE_RESULT_LENGTH = MAX_LINE_LENGTH * 3;
 
 /// basically cached token iterator result
 const ColumnStringView = struct {
+    /// original input on which the tokenization is done
+    s: []const u8 = undefined,
     cache: [MAX_COLUMNS][]const u8 = std.mem.zeroes([MAX_COLUMNS][]const u8),
     count: usize = 0,
 
     pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) ![][]const u8 {
         self.count = 0;
+        self.s = s;
 
         var iter = std.mem.tokenizeSequence(u8, s, delim);
         while (true) {
@@ -74,7 +77,8 @@ const Template = struct {
         return tpl;
     }
 
-    pub fn template(self: Template, columns: [][]const u8, buff: []u8) ![]u8 {
+    pub fn template(self: Template, buff: []u8, input: *ColumnStringView) ![]u8 {
+        const columns = input.fields();
         var offset: usize = 0;
         for (0..self.num_parts) |i| {
             switch (self.targets[i]) {
@@ -88,7 +92,7 @@ const Template = struct {
                     offset += s.len;
                 },
                 .column_index => |index| {
-                    if (index >= columns.len) {
+                    if (index >= input.count) {
                         return error.TooLittleColumnsForTemplate;
                     }
 
@@ -101,14 +105,12 @@ const Template = struct {
                     offset += s.len;
                 },
                 .all_columns => {
-                    for (columns) |s| {
-                        if (s.len + offset >= buff.len) {
-                            return error.TemplateResultTooLong;
-                        }
-
-                        std.mem.copyForwards(u8, buff[offset..], s);
-                        offset += s.len;
+                    if (input.s.len + offset >= buff.len) {
+                        return error.TemplateResultTooLong;
                     }
+
+                    std.mem.copyForwards(u8, buff[offset..], input.s);
+                    offset += input.s.len;
                 },
             }
         }
@@ -131,7 +133,8 @@ fn processLineWise(f: std.fs.File, tpl: *const Template, column_delim: []const u
         if (std.mem.indexOf(u8, line_buff[offset..], "\n")) |found| {
             const line = line_buff[offset .. offset + found];
             if (line.len != 0) {
-                const columns = try tpl.template(try tokenizationCache.update(line, column_delim), tpl_buffer);
+                _ = try tokenizationCache.update(line, column_delim);
+                const columns = try tpl.template(tpl_buffer, &tokenizationCache);
 
                 // TODO: need error handling for FileNotFound and different exist codes.
                 var child = std.process.Child.init(try tokenizationCache.update(columns, " "), allocator);
