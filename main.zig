@@ -1,15 +1,38 @@
 const std = @import("std");
 
-const MAX_LINE_LENGTH = 150;
+const MAX_LINE_LENGTH = 1000;
 const MAX_COLUMNS = 150;
+const MAX_TEMPLATE_RESULT_LENGTH = 2000;
+
+/// basically cached token iterator result
+const ColumnStringView = struct {
+    cache: [MAX_COLUMNS][]const u8 = std.mem.zeroes([MAX_COLUMNS][]const u8),
+    count: usize = 0,
+
+    pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) !void {
+        self.count = 0;
+
+        var iter = std.mem.tokenizeSequence(u8, s, delim);
+        while (true) {
+            const word = iter.next() orelse break;
+            if (self.count + 1 >= MAX_COLUMNS) {
+                return error.TooManyColumns;
+            }
+            self.cache[self.count] = word;
+            self.count += 1;
+        }
+    }
+
+    pub fn fields(self: *ColumnStringView) [][]const u8 {
+        return self.cache[0..self.count];
+    }
+};
 
 const Template = struct {
-    /// parts are views into the provided slice
     /// NOTE: the spot that the template had is an empty slice
     parts: [MAX_COLUMNS]?[]const u8 = std.mem.zeroes([MAX_COLUMNS]?[]const u8),
 
     /// col mapping specifies which placeholder the column has
-    /// it is absent for non templates. This is 1-index based
     col_mapping: [MAX_COLUMNS]?u8 = std.mem.zeroes([MAX_COLUMNS]?u8),
 
     num_columns: usize = 0,
@@ -51,7 +74,7 @@ const Template = struct {
                 if (col >= columns.len) {
                     return error.TooLittleColumnsForTemplate;
                 }
-                size_used_columns += columns[col - 1].len;
+                size_used_columns += columns[col].len;
             }
             if (self.parts[i]) |part| {
                 size_of_template += part.len;
@@ -81,28 +104,36 @@ const Template = struct {
     }
 };
 
-fn processLineWise(f: std.fs.File) !void {
-    var buff = std.mem.zeroes([MAX_LINE_LENGTH]u8);
+// TODO: use a heap allocated buffer as this is much faster than having
+//          so many read syscalls
+//          .
+fn processLineWise(f: std.fs.File, tpl: *const Template) !void {
+    var line_buff = std.mem.zeroes([MAX_LINE_LENGTH]u8);
+    var tpl_buffer = std.mem.zeroes([MAX_TEMPLATE_RESULT_LENGTH]u8);
+    var tokenizationCache: ColumnStringView = ColumnStringView{};
     var offset: usize = 0;
 
-    var n = try f.read(&buff);
+    var n = try f.read(&line_buff);
     while (true) {
-        if (std.mem.indexOf(u8, buff[offset..], "\n")) |found| {
-            const line = buff[offset .. offset + found];
+        if (std.mem.indexOf(u8, line_buff[offset..], "\n")) |found| {
+            const line = line_buff[offset .. offset + found];
             if (line.len != 0) {
-                std.debug.print("{s}\n", .{line});
+                // TODO: accept a delimiter instead of this hard coded one
+                try tokenizationCache.update(line, " ");
+                const tpl_res = try tpl.template(tokenizationCache.fields(), &tpl_buffer);
+                std.debug.print("{s}\n", .{tpl_res});
             }
             offset += found + 1;
             continue;
         }
 
-        std.mem.copyForwards(u8, &buff, buff[offset..]);
+        std.mem.copyForwards(u8, &line_buff, line_buff[offset..]);
 
-        n = try f.read(buff[buff.len - offset ..]);
+        n = try f.read(line_buff[line_buff.len - offset ..]);
         if (n == 0) {
             // if we normyally could have read more the line was just
             // too long for our buffer
-            if (try f.read(buff[0..1]) > 0) {
+            if (try f.read(line_buff[0..1]) > 0) {
                 return error.LineTooLong;
             }
             break;
@@ -117,17 +148,7 @@ pub fn main() !void {
     _ = argIter.next();
     const tplstr = argIter.next() orelse "";
 
-    try processLineWise(stdin);
-
     const tpl = try Template.init(tplstr, '{', '}');
 
-    var parts = std.mem.zeroes([4][]const u8);
-    parts[0] = "col1";
-    parts[1] = "col2";
-    parts[2] = "col3";
-    parts[3] = "col4";
-
-    var buff = std.mem.zeroes([1000]u8);
-
-    std.debug.print("{s}\n", .{try tpl.template(&parts, &buff)});
+    try processLineWise(stdin, &tpl);
 }
