@@ -10,6 +10,7 @@ const ColumnStringView = struct {
     /// original input on which the tokenization is done
     s: []const u8 = undefined,
     cache: [MAX_COLUMNS][]const u8 = std.mem.zeroes([MAX_COLUMNS][]const u8),
+    token_start_indecies: [MAX_COLUMNS]usize = std.mem.zeroes([MAX_COLUMNS]usize),
     count: usize = 0,
 
     pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) ![][]const u8 {
@@ -23,6 +24,7 @@ const ColumnStringView = struct {
                 return error.TooManyColumns;
             }
             self.cache[self.count] = word;
+            self.token_start_indecies[self.count] = @intFromPtr(&word[0]) - @intFromPtr(&s[0]);
             self.count += 1;
         }
 
@@ -32,11 +34,19 @@ const ColumnStringView = struct {
     pub fn fields(self: *ColumnStringView) [][]const u8 {
         return self.cache[0..self.count];
     }
+
+    pub fn indecies(self: *ColumnStringView) []usize {
+        return self.token_start_indecies[0..self.count];
+    }
 };
 
 const Template = struct {
     const MapTarget = union(enum) {
         column_index: usize,
+        column_range: struct {
+            start: usize,
+            end: usize,
+        },
         all_columns: void,
         template_str: void,
     };
@@ -65,10 +75,16 @@ const Template = struct {
             tpl.targets[tpl.num_parts] = MapTarget.template_str;
 
             const col = std.mem.trim(u8, s[start + opening.len .. end], " ");
-            if (col.len > 0) {
+            const range_delim_pos = std.mem.indexOfScalar(u8, col, '-');
+            if (col.len == 0) {
+                tpl.targets[tpl.num_parts + 1] = MapTarget.all_columns;
+            } else if (range_delim_pos == null) {
                 tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_index = try std.fmt.parseInt(u8, col, 10) };
             } else {
-                tpl.targets[tpl.num_parts + 1] = MapTarget.all_columns;
+                const range_start = try std.fmt.parseInt(u8, col[0..range_delim_pos.?], 10);
+                const range_end = try std.fmt.parseInt(u8, col[range_delim_pos.? + 1 ..], 10);
+
+                tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_range = .{ .start = range_start, .end = range_end } };
             }
 
             tpl.num_parts += 2;
@@ -92,10 +108,10 @@ const Template = struct {
     pub fn has_placeholders(self: *const Template) bool {
         for (0..self.num_parts) |i| {
             switch (self.targets[i]) {
-                .column_index => |_| {
+                .template_str => {},
+                else => {
                     return true;
                 },
-                else => {},
             }
         }
         return false;
@@ -127,6 +143,22 @@ const Template = struct {
 
                     std.mem.copyForwards(u8, buff[offset..], s);
                     offset += s.len;
+                },
+                .column_range => |range| {
+                    if (range.end > input.count) {
+                        return error.TooLittleColumnsForTemplate;
+                    }
+
+                    const start_index = input.indecies()[range.start];
+                    const end_index = input.indecies()[range.end - 1] + columns[range.end - 1].len;
+                    const width = end_index - start_index;
+
+                    if (width + offset >= buff.len) {
+                        return error.TemplateResultTooLong;
+                    }
+
+                    std.mem.copyForwards(u8, buff[offset..], input.s[start_index..end_index]);
+                    offset += width;
                 },
                 .all_columns => {
                     if (input.s.len + offset >= buff.len) {
