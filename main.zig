@@ -75,10 +75,33 @@ const Template = struct {
             offset = end + closing.len;
         }
 
+        if (!tpl.has_placeholders()) {
+            if (!std.mem.endsWith(u8, tpl.parts[tpl.num_parts - 1], " ")) {
+                tpl.parts[tpl.num_parts] = " ";
+                tpl.targets[tpl.num_parts] = MapTarget.template_str;
+                tpl.num_parts += 1;
+            }
+            tpl.parts[tpl.num_parts] = s[0..0];
+            tpl.targets[tpl.num_parts] = MapTarget.all_columns;
+            tpl.num_parts += 1;
+        }
+
         return tpl;
     }
 
-    pub fn template(self: Template, buff: []u8, input: *ColumnStringView) ![]u8 {
+    pub fn has_placeholders(self: *const Template) bool {
+        for (0..self.num_parts) |i| {
+            switch (self.targets[i]) {
+                .column_index => |_| {
+                    return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    pub fn template(self: *const Template, buff: []u8, input: *ColumnStringView) ![]u8 {
         const columns = input.fields();
         var offset: usize = 0;
         for (0..self.num_parts) |i| {
