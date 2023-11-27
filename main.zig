@@ -43,10 +43,6 @@ const ColumnStringView = struct {
 const Template = struct {
     const MapTarget = union(enum) {
         column_index: usize,
-        column_range: struct {
-            start: usize,
-            end: usize,
-        },
         all_columns: void,
         template_str: void,
     };
@@ -75,18 +71,11 @@ const Template = struct {
             tpl.targets[tpl.num_parts] = MapTarget.template_str;
 
             const col = std.mem.trim(u8, s[start + opening.len .. end], " ");
-            const range_delim_pos = std.mem.indexOfScalar(u8, col, '-');
             if (col.len == 0) {
                 tpl.targets[tpl.num_parts + 1] = MapTarget.all_columns;
-            } else if (range_delim_pos == null) {
-                tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_index = try std.fmt.parseInt(u8, col, 10) };
             } else {
-                const range_start = try std.fmt.parseInt(u8, col[0..range_delim_pos.?], 10);
-                const range_end = try std.fmt.parseInt(u8, col[range_delim_pos.? + 1 ..], 10);
-
-                tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_range = .{ .start = range_start, .end = range_end } };
+                tpl.targets[tpl.num_parts + 1] = MapTarget{ .column_index = try std.fmt.parseInt(u8, col, 10) };
             }
-
             tpl.num_parts += 2;
             offset = end + closing.len;
         }
@@ -117,101 +106,62 @@ const Template = struct {
         return false;
     }
 
-    pub fn template(self: *const Template, buff: []u8, input: *ColumnStringView) ![]u8 {
+    pub fn template(self: *const Template, writer: anytype, input: *ColumnStringView) !void {
         const columns = input.fields();
-        var offset: usize = 0;
         for (0..self.num_parts) |i| {
             switch (self.targets[i]) {
                 .template_str => {
-                    const s = self.parts[i];
-                    if (s.len + offset >= buff.len) {
-                        return error.TemplateResultTooLong;
-                    }
-
-                    std.mem.copyForwards(u8, buff[offset..], s);
-                    offset += s.len;
+                    try writer.writeAll(self.parts[i]);
                 },
                 .column_index => |index| {
                     if (index >= input.count) {
                         return error.TooLittleColumnsForTemplate;
                     }
 
-                    const s = columns[index];
-                    if (s.len + offset >= buff.len) {
-                        return error.TemplateResultTooLong;
-                    }
-
-                    std.mem.copyForwards(u8, buff[offset..], s);
-                    offset += s.len;
-                },
-                .column_range => |range| {
-                    if (range.end > input.count) {
-                        return error.TooLittleColumnsForTemplate;
-                    }
-
-                    const start_index = input.indecies()[range.start];
-                    const end_index = input.indecies()[range.end - 1] + columns[range.end - 1].len;
-                    const width = end_index - start_index;
-
-                    if (width + offset >= buff.len) {
-                        return error.TemplateResultTooLong;
-                    }
-
-                    std.mem.copyForwards(u8, buff[offset..], input.s[start_index..end_index]);
-                    offset += width;
+                    try writer.writeAll(columns[index]);
                 },
                 .all_columns => {
-                    if (input.s.len + offset >= buff.len) {
-                        return error.TemplateResultTooLong;
-                    }
-
-                    std.mem.copyForwards(u8, buff[offset..], input.s);
-                    offset += input.s.len;
+                    try writer.writeAll(input.s);
                 },
             }
         }
-
-        return buff[0..offset];
     }
 };
 
 fn processLineWise(f: std.fs.File, tpl: *const Template, column_delim: []const u8, allocator: std.mem.Allocator) !void {
-    var line_buff = try allocator.alloc(u8, MAX_LINE_LENGTH);
-    defer allocator.free(line_buff);
-    var tpl_buffer = try allocator.alloc(u8, MAX_TEMPLATE_RESULT_LENGTH);
-    defer allocator.free(tpl_buffer);
+    var colview: ColumnStringView = ColumnStringView{};
 
-    var tokenizationCache: ColumnStringView = ColumnStringView{};
-    var offset: usize = 0;
+    var tpl_buffer = std.ArrayList(u8).init(allocator);
+    defer tpl_buffer.deinit();
 
-    var n = try f.read(line_buff);
+    var read_buffer = std.ArrayList(u8).init(allocator);
+    defer read_buffer.deinit();
+
     while (true) {
-        if (std.mem.indexOf(u8, line_buff[offset..], "\n")) |found| {
-            const line = line_buff[offset .. offset + found];
-            if (line.len != 0) {
-                _ = try tokenizationCache.update(line, column_delim);
-                const columns = try tpl.template(tpl_buffer, &tokenizationCache);
-
-                // TODO: need error handling for FileNotFound and different exist codes.
-                var child = std.process.Child.init(try tokenizationCache.update(columns, " "), allocator);
-                _ = try child.spawnAndWait();
+        f.reader().streamUntilDelimiter(read_buffer.writer(), '\n', MAX_LINE_LENGTH) catch |err| {
+            switch (err) {
+                error.EndOfStream => {
+                    break;
+                },
+                error.StreamTooLong => {
+                    _ = try std.io.getStdErr().write("The input line was too long!");
+                    std.os.exit(1);
+                },
+                else => {
+                    _ = try std.io.getStdErr().write("Encountered unexpected error while reading stdin!");
+                    std.os.exit(1);
+                },
             }
-            offset += found + 1;
-            continue;
-        }
+        };
 
-        std.mem.copyForwards(u8, line_buff, line_buff[offset..]);
+        _ = try colview.update(read_buffer.items, column_delim);
+        try tpl.template(tpl_buffer.writer(), &colview);
 
-        n = try f.read(line_buff[line_buff.len - offset ..]);
-        if (n == 0) {
-            // if we normyally could have read more the line was just
-            // too long for our buffer
-            if (try f.read(line_buff[0..1]) > 0) {
-                return error.LineTooLong;
-            }
-            break;
-        }
-        offset = 0;
+        // TODO: need error handling for FileNotFound and different exist codes.
+        var child = std.process.Child.init(try colview.update(tpl_buffer.items, " "), allocator);
+        _ = try child.spawnAndWait();
+
+        tpl_buffer.clearRetainingCapacity();
     }
 }
 
