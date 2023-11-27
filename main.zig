@@ -13,7 +13,7 @@ const ColumnStringView = struct {
     token_start_indecies: [MAX_COLUMNS]usize = std.mem.zeroes([MAX_COLUMNS]usize),
     count: usize = 0,
 
-    pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) ![][]const u8 {
+    pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) !void {
         self.count = 0;
         self.s = s;
 
@@ -27,8 +27,6 @@ const ColumnStringView = struct {
             self.token_start_indecies[self.count] = @intFromPtr(&word[0]) - @intFromPtr(&s[0]);
             self.count += 1;
         }
-
-        return self.fields();
     }
 
     pub fn fields(self: *ColumnStringView) [][]const u8 {
@@ -144,24 +142,40 @@ fn processLineWise(f: std.fs.File, tpl: *const Template, column_delim: []const u
                     break;
                 },
                 error.StreamTooLong => {
-                    _ = try std.io.getStdErr().write("The input line was too long!");
+                    _ = try std.io.getStdErr().write("The input line was too long!\n");
                     std.os.exit(1);
                 },
                 else => {
-                    _ = try std.io.getStdErr().write("Encountered unexpected error while reading stdin!");
+                    _ = try std.io.getStdErr().write("Encountered unexpected error while reading stdin!\n");
                     std.os.exit(1);
                 },
             }
         };
 
-        _ = try colview.update(read_buffer.items, column_delim);
+        try colview.update(read_buffer.items, column_delim);
         try tpl.template(tpl_buffer.writer(), &colview);
 
-        // TODO: need error handling for FileNotFound and different exist codes.
-        var child = std.process.Child.init(try colview.update(tpl_buffer.items, " "), allocator);
-        _ = try child.spawnAndWait();
+        try colview.update(tpl_buffer.items, " ");
+        var child = std.process.Child.init(colview.fields(), allocator);
+        _ = child.spawnAndWait() catch |err| {
+            var stderr = std.io.getStdErr();
+            switch (err) {
+                error.FileNotFound => {
+                    _ = try stderr.write("Could not start process ... ");
+                    _ = try stderr.write(colview.fields()[0]);
+                    _ = try stderr.write(" could not be found! Is it in PATH?");
+                },
+                else => {
+                    _ = try stderr.write("failed starting process ... ");
+                    _ = try stderr.write(@typeName(@TypeOf(err)));
+                    _ = try stderr.write("\n");
+                },
+            }
+            std.os.exit(1);
+        };
 
         tpl_buffer.clearRetainingCapacity();
+        read_buffer.clearRetainingCapacity();
     }
 }
 
