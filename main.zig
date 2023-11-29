@@ -10,7 +10,6 @@ const ColumnStringView = struct {
     /// original input on which the tokenization is done
     s: []const u8 = undefined,
     cache: [MAX_COLUMNS][]const u8 = std.mem.zeroes([MAX_COLUMNS][]const u8),
-    token_start_indecies: [MAX_COLUMNS]usize = std.mem.zeroes([MAX_COLUMNS]usize),
     count: usize = 0,
 
     pub fn update(self: *ColumnStringView, s: []const u8, delim: []const u8) !void {
@@ -24,17 +23,12 @@ const ColumnStringView = struct {
                 return error.TooManyColumns;
             }
             self.cache[self.count] = word;
-            self.token_start_indecies[self.count] = @intFromPtr(&word[0]) - @intFromPtr(&s[0]);
             self.count += 1;
         }
     }
 
     pub fn fields(self: *ColumnStringView) [][]const u8 {
         return self.cache[0..self.count];
-    }
-
-    pub fn indecies(self: *ColumnStringView) []usize {
-        return self.token_start_indecies[0..self.count];
     }
 };
 
